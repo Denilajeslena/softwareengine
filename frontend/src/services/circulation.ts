@@ -250,3 +250,39 @@ export async function fetchAllReservationsApi(): Promise<ApiResponse<{ reservati
   }
 }
 
+export interface LibrarianStudentSummary {
+  userId: string;
+  name: string;
+  email: string;
+  role: string;
+  department: string;
+  studentId: string;
+  standing: string;
+  status: string;
+  enrolledDate: string;
+  activeLoans: number;
+  overdueLoans: number;
+  totalFines: number;
+}
+
+export async function fetchLibrarianStudentsApi(search?: string): Promise<
+  ApiResponse<{ students: LibrarianStudentSummary[]; count: number }>
+> {
+  try {
+    const query = search ? `?search=${encodeURIComponent(search)}` : '';
+    const res = await fetch(`${API_BASE_URL}/librarian/students${query}`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    return await res.json();
+  } catch (err) {
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'Failed to retrieve students directory.',
+      data: { students: [], count: 0 },
+      error: { code: 'NETWORK_ERROR' },
+    };
+  }
+}
+
+

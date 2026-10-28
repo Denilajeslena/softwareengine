@@ -1,6 +1,7 @@
-from flask import Blueprint, request
+from flask import Blueprint, request, g
 from app.utils.response import success_response, error_response
 from app.utils.auth import roles_required
+from app.services.audit_service import log_audit_event
 from app.services.book_service import (
     get_all_books,
     get_book_by_id,
@@ -132,6 +133,16 @@ def add_new_book():
         )
 
     new_book = create_book(data)
+    actor_user = getattr(g, "current_user", {})
+    log_audit_event(
+        actor=actor_user.get("email", "librarian@scholars.shelf"),
+        role=actor_user.get("role", "librarian"),
+        action="BOOK_CREATE",
+        resource_type="book",
+        resource_id=new_book["id"],
+        details=f"Catalogued '{title}' with {new_book.get('totalCopies')} copies in {category}.",
+        level="SUCCESS",
+    )
     return success_response(
         data={"book": new_book},
         message=f"Book '{title}' catalogued successfully with {new_book.get('totalCopies')} copy units.",
@@ -170,6 +181,16 @@ def modify_book(book_id: str):
 
     try:
         updated = update_book(book_id, data)
+        actor_user = getattr(g, "current_user", {})
+        log_audit_event(
+            actor=actor_user.get("email", "librarian@scholars.shelf"),
+            role=actor_user.get("role", "librarian"),
+            action="BOOK_UPDATE",
+            resource_type="book",
+            resource_id=book_id,
+            details=f"Updated volume records for '{updated.get('title')}'.",
+            level="INFO",
+        )
         return success_response(
             data={"book": updated},
             message="Book records updated successfully.",
@@ -199,6 +220,16 @@ def delete_book(book_id: str):
         )
 
     archived = archive_book(book_id)
+    actor_user = getattr(g, "current_user", {})
+    log_audit_event(
+        actor=actor_user.get("email", "librarian@scholars.shelf"),
+        role=actor_user.get("role", "librarian"),
+        action="BOOK_ARCHIVE",
+        resource_type="book",
+        resource_id=book_id,
+        details=f"Archived volume '{existing.get('title')}' from active circulation.",
+        level="WARNING",
+    )
     return success_response(
         data={"book": archived},
         message=f"Book '{existing.get('title')}' has been archived from circulation.",
@@ -225,6 +256,16 @@ def add_copy_route(book_id: str):
                 status_code=404,
                 error_code="BOOK_NOT_FOUND",
             )
+        actor_user = getattr(g, "current_user", {})
+        log_audit_event(
+            actor=actor_user.get("email", "librarian@scholars.shelf"),
+            role=actor_user.get("role", "librarian"),
+            action="COPY_ADD",
+            resource_type="book_copy",
+            resource_id=copy.get("copyId"),
+            details=f"Added physical copy unit '{copy.get('copyId')}' to '{book_id}'.",
+            level="SUCCESS",
+        )
         return success_response(
             data={"copy": copy},
             message=f"Copy unit '{copy.get('copyId')}' successfully added to inventory.",
@@ -247,6 +288,16 @@ def remove_copy_route(book_id: str, copy_id: str):
     """
     try:
         removed = remove_single_copy(book_id, copy_id)
+        actor_user = getattr(g, "current_user", {})
+        log_audit_event(
+            actor=actor_user.get("email", "librarian@scholars.shelf"),
+            role=actor_user.get("role", "librarian"),
+            action="COPY_REMOVE",
+            resource_type="book_copy",
+            resource_id=copy_id,
+            details=f"Removed physical copy unit '{copy_id}' from inventory.",
+            level="WARNING",
+        )
         if not removed:
             return error_response(
                 message=f"Book with identifier '{book_id}' not found.",

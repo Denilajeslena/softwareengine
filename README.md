@@ -137,6 +137,27 @@ The platform includes pre-configured accounts representing all institutional rol
 | `GET` | `/api/books/<id>/reviews` | Public | Peer reviews, average score, and star breakdown. |
 | `POST` | `/api/books/<id>/reviews` | Student | Submit peer book review with 1-5 star rating. |
 
+### Enterprise Upgrades: Admin, Inventory & Student Modules
+| Method | Endpoint | Access | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/admin/policy` | Admin | Retrieve dynamic circulation rules (loan duration, fines, renewals, hold limits). |
+| `PUT` | `/api/admin/policy` | Admin | Update and immediately enforce persistent circulation policy. |
+| `GET` | `/api/admin/audit-logs` | Admin | Query append-only audit trail with filtering and pagination. |
+| `GET` | `/api/admin/audit-logs?format=csv` | Admin | Download filtered audit events as RFC-compliant CSV. |
+| `GET` | `/api/admin/roles` | Admin | Retrieve role definitions and capability permissions matrix. |
+| `PUT` | `/api/admin/roles/<role>/permissions` | Admin | Update role permissions with governance privilege protection. |
+| `POST` | `/api/auth/admin/users` | Admin | Provision new accounts with Student, Librarian, or Admin roles. |
+| `PATCH` | `/api/auth/admin/users/<id>/status` | Admin | Toggle account status (active / suspended) with last-admin safeguard. |
+| `DELETE` | `/api/auth/admin/users/<id>` | Admin | Permanently delete account (blocked if active loans exist or last admin). |
+| `GET` | `/api/inventory/overview` | Librarian/Admin | Live physical stacks, capacity, copy counts, and utilization rates. |
+| `POST` | `/api/inventory/stacks` | Librarian/Admin | Create or configure physical stack sections. |
+| `POST` | `/api/inventory/audits` | Librarian/Admin | Submit barcode reconciliation scan and receive discrepancy audit report. |
+| `GET` | `/api/librarian/students` | Librarian/Admin | Live student directory with active loan quotas and overdue fine tallies. |
+| `GET` | `/api/student/preferences` | Student | Retrieve patron notification, accessibility, and display preferences. |
+| `PUT` | `/api/student/preferences` | Student | Update and persist patron preferences. |
+| `GET` | `/api/student/card` | Student | Generate verifiable digital library card with base64 QR code and signed token. |
+| `POST` | `/api/student/verify-card` | Public/Staff | Scanner gateway verifying authenticity and expiration of student card token. |
+
 ---
 
 ## 5. How to Run the Application
@@ -144,7 +165,8 @@ The platform includes pre-configured accounts representing all institutional rol
 ### 1. Prerequisites
 - Python 3.10+
 - Node.js 18+ and npm
-- (Optional) MongoDB running on `localhost:27017` (auto-falls back to safe memory repository if offline)
+- (Optional) MongoDB running on `localhost:27017` (auto-falls back to safe in-memory repository if offline)
+- (Optional) Generative LLM: set `GEMINI_API_KEY` or `OPENAI_API_KEY` in `backend/.env` (auto-falls back to local academic heuristic synthesis)
 
 ### 2. Backend Setup & Startup
 ```powershell
@@ -176,14 +198,15 @@ npm run dev
 
 ### 4. Running the Complete Automated Test Suite
 ```powershell
-# Run all 42 backend unit and integration tests
+# Run all 51 backend unit and integration tests
 python -m unittest discover -s backend/tests -p "test_*.py"
 ```
-**Result**: 42 tests passing 100% (`OK`).
+**Result**: 51 tests passing 100% (`OK`).
 
 ### 5. Running the Frontend Production Build
 ```powershell
 cd frontend
 npm run build
 ```
-**Result**: Succeeded with 0 TypeScript errors.
+**Result**: Succeeded with 0 TypeScript errors (`dist/` generated).
+

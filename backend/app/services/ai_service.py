@@ -1,9 +1,16 @@
+import os
 import re
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
-from backend.app.services.book_service import get_all_books, get_book_by_id
-from backend.app.services.circulation_service import get_student_loans
+
+try:
+    from app.services.book_service import get_all_books, get_book_by_id
+    from app.services.circulation_service import get_student_loans
+except ImportError:
+    from backend.app.services.book_service import get_all_books, get_book_by_id
+    from backend.app.services.circulation_service import get_student_loans
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +404,94 @@ class BookMindEngine:
 
         return results
 
+    def _call_external_llm(self, content_clean: str, inferred_title: str) -> Optional[Dict[str, Any]]:
+        """
+        Attempts to query external LLM provider (Google Gemini or OpenAI) if configured via environment variables.
+        Keeps API credentials strictly isolated on backend.
+        """
+        provider = os.getenv("AI_PROVIDER", "").strip().lower()
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+
+        # 1. Google Gemini Provider
+        if (provider in ("gemini", "google") or not provider) and gemini_key:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=gemini_key)
+                model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+                model = genai.GenerativeModel(model_name)
+
+                prompt = (
+                    "You are the BookMind Academic AI Study Assistant for a university library.\n"
+                    f"Analyze the following academic excerpt entitled '{inferred_title}' and generate a structured JSON study guide.\n"
+                    "Your output MUST be valid JSON with this exact schema:\n"
+                    "{\n"
+                    '  "executiveSummary": "string summary",\n'
+                    '  "keyArguments": ["bullet 1", "bullet 2", "bullet 3"],\n'
+                    '  "concepts": [{"term": "string", "importance": "High Priority", "explanation": "string"}],\n'
+                    '  "quiz": [{"id": "q1", "question": "string", "options": ["opt1", "opt2", "opt3", "opt4"], "correctAnswerIndex": 0, "explanation": "string"}],\n'
+                    '  "flashcards": [{"id": "fc-1", "front": "string", "back": "string"}]\n'
+                    "}\n\n"
+                    f"Academic Text:\n{content_clean[:4000]}"
+                )
+
+                response = model.generate_content(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                if response and response.text:
+                    parsed = json.loads(response.text)
+                    parsed["model"] = f"BookMind-Gemini ({model_name})"
+                    parsed["provider"] = "gemini"
+                    parsed["providerConfigured"] = True
+                    parsed["providerStatus"] = "live_llm"
+                    parsed["notice"] = f"Synthesized with {model_name} neural model."
+                    return parsed
+            except Exception as e:
+                logger.warning(f"Gemini LLM generation failed, falling back to local heuristic: {e}")
+
+        # 2. OpenAI Provider
+        if (provider == "openai" or not provider) and openai_key:
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=openai_key)
+                model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+                prompt = (
+                    "You are the BookMind Academic AI Study Assistant for a university library.\n"
+                    f"Analyze the following academic excerpt entitled '{inferred_title}' and output a structured JSON study guide.\n"
+                    "Output valid JSON matching this schema:\n"
+                    "{\n"
+                    '  "executiveSummary": "string",\n'
+                    '  "keyArguments": ["string"],\n'
+                    '  "concepts": [{"term": "string", "importance": "High Priority", "explanation": "string"}],\n'
+                    '  "quiz": [{"id": "q1", "question": "string", "options": ["opt1", "opt2", "opt3", "opt4"], "correctAnswerIndex": 0, "explanation": "string"}],\n'
+                    '  "flashcards": [{"id": "fc-1", "front": "string", "back": "string"}]\n'
+                    "}\n\n"
+                    f"Text:\n{content_clean[:4000]}"
+                )
+
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    response_format={"type": "json_object"},
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1500,
+                    timeout=12.0,
+                )
+                raw_json = completion.choices[0].message.content
+                if raw_json:
+                    parsed = json.loads(raw_json)
+                    parsed["model"] = f"BookMind-OpenAI ({model_name})"
+                    parsed["provider"] = "openai"
+                    parsed["providerConfigured"] = True
+                    parsed["providerStatus"] = "live_llm"
+                    parsed["notice"] = f"Synthesized with {model_name} neural model."
+                    return parsed
+            except Exception as e:
+                logger.warning(f"OpenAI LLM generation failed, falling back to local heuristic: {e}")
+
+        return None
+
     def generate_study_assistant(
         self,
         content: str,
@@ -405,8 +500,8 @@ class BookMindEngine:
     ) -> Dict[str, Any]:
         """
         AI Study Assistant for authorized or user-uploaded academic materials.
-        Generates executive summaries, key concept definitions, practice quiz items,
-        and active recall flashcards.
+        Dispatches to configured LLM provider (Gemini / OpenAI) if keys are provided,
+        or gracefully falls back to deterministic local heuristic synthesis.
         """
         content_clean = (content or "").strip()
         if not content_clean:
@@ -421,12 +516,31 @@ class BookMindEngine:
             first_line = content_clean.split("\n")[0][:60]
             inferred_title = first_line if len(first_line) > 5 else "Academic Reading & Notes"
 
-        # Word count & reading metrics
         words = content_clean.split()
         word_count = len(words)
         est_read_time_min = max(1, round(word_count / 180))
 
-        # 1. Executive Summary & Thesis
+        # Check external LLM provider first
+        llm_result = self._call_external_llm(content_clean, inferred_title)
+        if llm_result:
+            return {
+                "title": inferred_title,
+                "wordCount": word_count,
+                "estimatedReadTimeMinutes": est_read_time_min,
+                "executiveSummary": llm_result.get("executiveSummary", ""),
+                "keyArguments": llm_result.get("keyArguments", []),
+                "concepts": llm_result.get("concepts", []),
+                "quiz": llm_result.get("quiz", []),
+                "flashcards": llm_result.get("flashcards", []),
+                "synthesizedAt": datetime.now(timezone.utc).isoformat(),
+                "model": llm_result.get("model", "BookMind-LLM"),
+                "provider": llm_result.get("provider", "llm"),
+                "providerConfigured": True,
+                "providerStatus": "live_llm",
+                "notice": llm_result.get("notice", "Synthesized using configured generative AI provider."),
+            }
+
+        # Local deterministic heuristic fallback
         sentences = [s.strip() for s in re.split(r"[.!?]+", content_clean) if len(s.strip()) > 15]
         summary_points = sentences[:4] if len(sentences) >= 4 else sentences
         executive_summary = (
@@ -441,8 +555,6 @@ class BookMindEngine:
             f"Synthesis: {summary_points[2]}" if len(summary_points) > 2 else "Connects theoretical theorems to practical computing and scientific applications.",
         ]
 
-        # 2. Key Concepts & Definitions
-        # Find capital words or significant nouns as terms
         terms = re.findall(r"\b[A-Z][a-z]{3,}\b", content_clean)
         unique_terms = list(dict.fromkeys(terms))[:5]
         if not unique_terms:
@@ -453,10 +565,9 @@ class BookMindEngine:
             concepts.append({
                 "term": term,
                 "importance": "High Priority",
-                "explanation": f"A foundational concept within the text representing structural rules, design criteria, or optimization constraints.",
+                "explanation": "A foundational concept within the text representing structural rules, design criteria, or optimization constraints.",
             })
 
-        # 3. Practice Quiz with Explanations
         quiz_items = [
             {
                 "id": "q1",
@@ -496,7 +607,6 @@ class BookMindEngine:
             },
         ]
 
-        # 4. Flashcards for Active Recall
         flashcards = [
             {
                 "id": "fc-1",
@@ -506,7 +616,7 @@ class BookMindEngine:
             {
                 "id": "fc-2",
                 "front": f"Define the role of '{unique_terms[0]}' in this context:",
-                "back": f"Serves as the structural baseline or conceptual pillar for the overarching framework.",
+                "back": "Serves as the structural baseline or conceptual pillar for the overarching framework.",
             },
             {
                 "id": "fc-3",
@@ -514,6 +624,8 @@ class BookMindEngine:
                 "back": "Focus on reproducible mechanisms, asymptotic behavior, and underlying mathematical/logical assumptions.",
             },
         ]
+
+        has_env_key = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
         return {
             "title": inferred_title,
@@ -525,7 +637,14 @@ class BookMindEngine:
             "quiz": quiz_items,
             "flashcards": flashcards,
             "synthesizedAt": datetime.now(timezone.utc).isoformat(),
-            "model": "BookMind-StudyAssist-v1",
+            "model": "BookMind-Local-Heuristic-v1",
+            "provider": "local_heuristic",
+            "providerConfigured": has_env_key,
+            "providerStatus": "local_engine",
+            "notice": (
+                "Generated via BookMind local heuristic engine. "
+                "To enable generative LLM intelligence, add GEMINI_API_KEY or OPENAI_API_KEY to your backend/.env file."
+            ),
         }
 
 

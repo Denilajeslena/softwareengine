@@ -182,4 +182,80 @@ export async function fetchAdminUsersApi(roleFilter?: string): Promise<ApiRespon
   }
 }
 
+export async function provisionUserApi(userData: {
+  name: string;
+  email: string;
+  password?: string;
+  role: 'student' | 'librarian' | 'admin';
+  department?: string;
+  studentId?: string;
+}): Promise<ApiResponse<{ user: User }>> {
+  const token = getStoredToken();
+  try {
+    const response = await fetch(`${API_BASE_URL}/auth/admin/users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(userData),
+    });
+    return await response.json();
+  } catch (err) {
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'Failed to provision user.',
+      data: {} as { user: User },
+      error: { code: 'NETWORK_ERROR' },
+    };
+  }
+}
+
+export async function updateUserStatusApi(userId: string, status: string | boolean): Promise<ApiResponse<{ user: User; isActive: boolean }>> {
+  const token = getStoredToken();
+  const payload = typeof status === 'boolean' ? { isActive: status } : { status };
+  try {
+    const response = await fetch(`${API_BASE_URL}/auth/admin/users/${userId}/status`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    return await response.json();
+  } catch (err) {
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'Failed to update user status.',
+      data: {} as { user: User; isActive: boolean },
+      error: { code: 'NETWORK_ERROR' },
+    };
+  }
+}
+
+export async function deleteUserApi(userId: string): Promise<ApiResponse<{ deletedUserId: string }>> {
+  const token = getStoredToken();
+  try {
+    const response = await fetch(`${API_BASE_URL}/auth/admin/users/${userId}`, {
+      method: 'DELETE',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    return await response.json();
+  } catch (err) {
+    return {
+      success: false,
+      message: err instanceof Error ? err.message : 'Failed to delete user.',
+      data: {} as { deletedUserId: string },
+      error: { code: 'NETWORK_ERROR' },
+    };
+  }
+}
+
+
 

@@ -1,22 +1,35 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple
-from backend.app.services.database import get_mongo_client
-from backend.app.services.book_service import (
-    get_book_by_id,
-    checkout_book_copy,
-    return_book_copy,
-    reserve_book_copy,
-)
+try:
+    from backend.app.services.database import get_mongo_client
+    from backend.app.services.policy_service import get_circulation_policy
+    from backend.app.services.audit_service import log_audit_event
+    from backend.app.services.book_service import (
+        get_book_by_id,
+        checkout_book_copy,
+        return_book_copy,
+        reserve_book_copy,
+    )
+except ImportError:
+    from app.services.database import get_mongo_client
+    from app.services.policy_service import get_circulation_policy
+    from app.services.audit_service import log_audit_event
+    from app.services.book_service import (
+        get_book_by_id,
+        checkout_book_copy,
+        return_book_copy,
+        reserve_book_copy,
+    )
 
 logger = logging.getLogger(__name__)
 
-# Configurable Library Circulation Rules
+# Legacy default constants for backward-compatibility with tests
 MAX_ACTIVE_LOANS_PER_STUDENT = 5
 DEFAULT_LOAN_DAYS = 14
 MAX_RENEWALS = 2
 RENEWAL_DAYS = 14
-DAILY_FINE_RATE = 0.50  # USD $0.50 per day past due date
+DAILY_FINE_RATE = 0.50
 PICKUP_WINDOW_HOURS = 48
 
 _in_memory_loans: Dict[str, Dict[str, Any]] = {}
@@ -50,9 +63,12 @@ def get_reservations_collection():
 
 def _calculate_loan_fine_and_status(loan: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Recalculates dynamic overdue status and fine amount for a loan.
-    Fine = days overdue * DAILY_FINE_RATE.
+    Recalculates dynamic overdue status and fine amount for a loan using active circulation policy.
+    Fine = days overdue * policy.daily_fine_rate.
     """
+    policy = get_circulation_policy()
+    daily_fine_rate = policy.get("overdue_fine_per_day", 0.50)
+
     now = datetime.now(timezone.utc)
     due_str = loan.get("dueDate", "")
     return_str = loan.get("returnDate")
@@ -73,7 +89,7 @@ def _calculate_loan_fine_and_status(loan: Dict[str, Any]) -> Dict[str, Any]:
             days_late = (return_dt - due_dt).days
             if (return_dt - due_dt).seconds > 0 and days_late == 0:
                 days_late = 1
-            loan["fineAmount"] = round(days_late * DAILY_FINE_RATE, 2)
+            loan["fineAmount"] = round(days_late * daily_fine_rate, 2)
         else:
             loan["fineAmount"] = 0.0
         return loan
@@ -84,7 +100,7 @@ def _calculate_loan_fine_and_status(loan: Dict[str, Any]) -> Dict[str, Any]:
         if (now - due_dt).seconds > 0 and days_overdue == 0:
             days_overdue = 1
         loan["status"] = "overdue"
-        loan["fineAmount"] = round(days_overdue * DAILY_FINE_RATE, 2)
+        loan["fineAmount"] = round(days_overdue * daily_fine_rate, 2)
         loan["daysOverdue"] = days_overdue
     else:
         if loan.get("status") != "pending_approval":
@@ -238,7 +254,10 @@ def get_all_loans(status: Optional[str] = None, user_id: Optional[str] = None, u
 
 
 def get_student_loans(user_identifier: str, user_email: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves loans for a student along with summary statistics."""
+    """Retrieves loans for a student along with summary statistics based on active policy."""
+    policy = get_circulation_policy()
+    max_active = policy.get("max_active_loans", 5)
+
     all_loans = get_all_loans(user_id=user_identifier, user_email=user_email)
     active = [l for l in all_loans if l.get("status") in ("active", "overdue")]
     history = [l for l in all_loans if l.get("status") == "returned"]
@@ -252,8 +271,8 @@ def get_student_loans(user_identifier: str, user_email: Optional[str] = None) ->
         "activeCount": len(active),
         "totalCount": len(all_loans),
         "totalFines": round(total_fines, 2),
-        "remainingAllowance": max(0, MAX_ACTIVE_LOANS_PER_STUDENT - len(active)),
-        "maxAllowance": MAX_ACTIVE_LOANS_PER_STUDENT,
+        "remainingAllowance": max(0, max_active - len(active)),
+        "maxAllowance": max_active,
     }
 
 
@@ -261,11 +280,16 @@ def request_book_loan(user: Dict[str, Any], book_id: str, copy_id: Optional[str]
     """
     Student submits a borrow request for a book.
     Validations:
-      1. Student active loan limit (max 5)
+      1. Student active loan limit (enforced via dynamic policy)
       2. No duplicate active loan for the exact same book
       3. Copies available in stacks
+      4. Book is not archived
     """
     _seed_circulation()
+    policy = get_circulation_policy()
+    max_active = policy.get("max_active_loans", 5)
+    loan_days = policy.get("loan_duration_days", 14)
+
     user_id = user.get("id") or user.get("email")
     student_name = user.get("name", "Student Patron")
     student_email = user.get("email", "")
@@ -274,9 +298,9 @@ def request_book_loan(user: Dict[str, Any], book_id: str, copy_id: Optional[str]
     # 1. Check max active loans
     current_loans = get_all_loans(user_id=user_id, user_email=student_email)
     active_loans = [l for l in current_loans if l.get("status") in ("active", "overdue", "pending_approval")]
-    if len(active_loans) >= MAX_ACTIVE_LOANS_PER_STUDENT:
+    if len(active_loans) >= max_active:
         raise ValueError(
-            f"You have reached your maximum loan allowance of {MAX_ACTIVE_LOANS_PER_STUDENT} concurrent books. "
+            f"You have reached your maximum loan allowance of {max_active} concurrent books. "
             f"Please return a checked-out volume before borrowing another."
         )
 
@@ -289,6 +313,9 @@ def request_book_loan(user: Dict[str, Any], book_id: str, copy_id: Optional[str]
     if not book:
         raise ValueError(f"Book with identifier '{book_id}' does not exist.")
 
+    if book.get("isArchived") or book.get("status") == "archived":
+        raise ValueError("Archived volumes cannot be borrowed.")
+
     if book.get("availableCopies", 0) <= 0:
         raise ValueError("No physical copies are currently available in the stacks. You may place a reservation hold instead.")
 
@@ -296,7 +323,7 @@ def request_book_loan(user: Dict[str, Any], book_id: str, copy_id: Optional[str]
     updated_book, target_copy = checkout_book_copy(book_id, copy_id)
 
     now = datetime.now(timezone.utc)
-    due_date = now + timedelta(days=DEFAULT_LOAN_DAYS)
+    due_date = now + timedelta(days=loan_days)
     loan_id = f"loan-{int(now.timestamp())}-{book_id[:4]}"
 
     new_loan = {
@@ -327,15 +354,33 @@ def request_book_loan(user: Dict[str, Any], book_id: str, copy_id: Optional[str]
             logger.warning(f"Failed to persist loan to MongoDB: {e}")
 
     _in_memory_loans[loan_id] = new_loan
+
+    log_audit_event(
+        actor=student_email,
+        role="student",
+        action="LOAN_REQUEST",
+        resource_type="loan",
+        resource_id=loan_id,
+        details=f"Self-service loan for '{book.get('title')}' (Copy: {target_copy.get('copyId')}).",
+        level="SUCCESS",
+    )
+
     return new_loan
 
 
-def issue_book_by_librarian(librarian_user: Dict[str, Any], student_identifier: str, book_id: str, copy_id: Optional[str] = None, duration_days: int = 14) -> Dict[str, Any]:
+def issue_book_by_librarian(librarian_user: Dict[str, Any], student_identifier: str, book_id: str, copy_id: Optional[str] = None, duration_days: Optional[int] = None) -> Dict[str, Any]:
     """Librarian issues a book directly to a student at the circulation desk."""
     _seed_circulation()
+    policy = get_circulation_policy()
+    max_active = policy.get("max_active_loans", 5)
+    default_days = policy.get("loan_duration_days", 14)
+
     book = get_book_by_id(book_id)
     if not book:
         raise ValueError(f"Book '{book_id}' not found.")
+
+    if book.get("isArchived") or book.get("status") == "archived":
+        raise ValueError("Archived volumes cannot be issued for circulation.")
 
     if book.get("availableCopies", 0) <= 0:
         raise ValueError("No copies currently available in stock.")
@@ -343,8 +388,8 @@ def issue_book_by_librarian(librarian_user: Dict[str, Any], student_identifier: 
     # Check student active loan allowance
     existing_loans = get_all_loans(user_id=student_identifier)
     active = [l for l in existing_loans if l.get("status") in ("active", "overdue")]
-    if len(active) >= MAX_ACTIVE_LOANS_PER_STUDENT:
-        raise ValueError(f"Student has reached the maximum of {MAX_ACTIVE_LOANS_PER_STUDENT} active loans.")
+    if len(active) >= max_active:
+        raise ValueError(f"Student has reached the maximum of {max_active} active loans.")
 
     # Prevent duplicate active loan
     if any(l.get("bookId") == book_id and l.get("status") in ("active", "overdue") for l in existing_loans):
@@ -353,7 +398,7 @@ def issue_book_by_librarian(librarian_user: Dict[str, Any], student_identifier: 
     updated_book, target_copy = checkout_book_copy(book_id, copy_id)
 
     now = datetime.now(timezone.utc)
-    due_date = now + timedelta(days=duration_days or DEFAULT_LOAN_DAYS)
+    due_date = now + timedelta(days=duration_days or default_days)
     loan_id = f"loan-{int(now.timestamp())}-{target_copy.get('copyId')[-4:]}"
 
     new_loan = {
@@ -384,6 +429,17 @@ def issue_book_by_librarian(librarian_user: Dict[str, Any], student_identifier: 
             pass
 
     _in_memory_loans[loan_id] = new_loan
+
+    log_audit_event(
+        actor=librarian_user.get("email", "librarian@scholars.shelf"),
+        role=librarian_user.get("role", "librarian"),
+        action="LOAN_ISSUE",
+        resource_type="loan",
+        resource_id=loan_id,
+        details=f"Issued '{book.get('title')}' (Copy: {target_copy.get('copyId')}) to {student_identifier}.",
+        level="SUCCESS",
+    )
+
     return new_loan
 
 
@@ -396,6 +452,9 @@ def return_loan(loan_id: str, librarian_user: Optional[Dict[str, Any]] = None) -
     - Checks reservations queue: if students are waiting, sets next reservation to 'ready'
     """
     _seed_circulation()
+    policy = get_circulation_policy()
+    pickup_hours = policy.get("pickup_window_hours", 48)
+
     all_loans = get_all_loans()
     loan = next((l for l in all_loans if l.get("id") == loan_id), None)
     if not loan:
@@ -408,7 +467,8 @@ def return_loan(loan_id: str, librarian_user: Optional[Dict[str, Any]] = None) -
     loan["returnDate"] = now.isoformat()
     loan = _calculate_loan_fine_and_status(loan)
     loan["status"] = "returned"
-    loan["returnedTo"] = librarian_user.get("name", "Circulation Desk") if librarian_user else "Circulation Desk"
+    actor_name = librarian_user.get("name", "Circulation Desk") if librarian_user else "Circulation Desk"
+    loan["returnedTo"] = actor_name
 
     # Restock physical copy
     book_id = loan.get("bookId")
@@ -422,7 +482,7 @@ def return_loan(loan_id: str, librarian_user: Optional[Dict[str, Any]] = None) -
     if waiting_reservations:
         next_res = waiting_reservations[0]
         next_res["status"] = "ready"
-        next_res["pickupDeadline"] = (now + timedelta(hours=PICKUP_WINDOW_HOURS)).isoformat()
+        next_res["pickupDeadline"] = (now + timedelta(hours=pickup_hours)).isoformat()
         next_res["assignedCopyId"] = copy_id
         # Reserve copy
         reserve_book_copy(book_id, copy_id)
@@ -446,6 +506,18 @@ def return_loan(loan_id: str, librarian_user: Optional[Dict[str, Any]] = None) -
             pass
 
     _in_memory_loans[loan_id] = loan
+
+    actor_email = librarian_user.get("email", "desk@scholars.shelf") if librarian_user else "desk@scholars.shelf"
+    log_audit_event(
+        actor=actor_email,
+        role="librarian" if librarian_user else "system",
+        action="LOAN_RETURN",
+        resource_type="loan",
+        resource_id=loan_id,
+        details=f"Returned '{loan.get('bookTitle')}' (Copy: {copy_id}). Fine: ${loan.get('fineAmount', 0.0):.2f}.",
+        level="SUCCESS",
+    )
+
     return {
         "loan": loan,
         "notification": notification,
@@ -454,14 +526,18 @@ def return_loan(loan_id: str, librarian_user: Optional[Dict[str, Any]] = None) -
 
 def renew_loan(loan_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extends an active loan's due date by 14 days.
+    Extends an active loan's due date based on dynamic policy limits.
     Validations:
       1. Must be the borrower or librarian/admin
       2. Loan must be 'active' or 'overdue'
-      3. Max renewals not exceeded (max 2 renewals)
+      3. Max renewals not exceeded (policy limit)
       4. Cannot renew if another patron has reserved the title
     """
     _seed_circulation()
+    policy = get_circulation_policy()
+    max_renewals = policy.get("renewal_limit", 2)
+    renewal_days = policy.get("renewal_duration_days", 14)
+
     all_loans = get_all_loans()
     loan = next((l for l in all_loans if l.get("id") == loan_id), None)
     if not loan:
@@ -477,15 +553,14 @@ def renew_loan(loan_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Cannot renew a book that has already been returned.")
 
     current_renewals = loan.get("renewalsCount", 0)
-    if current_renewals >= MAX_RENEWALS:
-        raise ValueError(f"Maximum renewal limit of {MAX_RENEWALS} reached for this loan. Please return the volume to circulation.")
+    if current_renewals >= max_renewals:
+        raise ValueError(f"Maximum renewal limit of {max_renewals} reached for this loan. Please return the volume to circulation.")
 
     # Check if other patrons have reserved this book
     pending_holds = get_all_reservations(book_id=loan.get("bookId"), status="pending")
     if pending_holds:
         raise ValueError("Renewal declined: another patron has placed a hold reservation on this title.")
 
-    # Add 14 days from current due date (or today if overdue)
     now = datetime.now(timezone.utc)
     try:
         due_dt = datetime.fromisoformat(loan.get("dueDate", "").replace("Z", "+00:00"))
@@ -493,7 +568,7 @@ def renew_loan(loan_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         base_dt = now
 
-    new_due = base_dt + timedelta(days=RENEWAL_DAYS)
+    new_due = base_dt + timedelta(days=renewal_days)
     loan["dueDate"] = new_due.isoformat()
     loan["renewalsCount"] = current_renewals + 1
     loan["status"] = "active"
@@ -507,6 +582,17 @@ def renew_loan(loan_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
             pass
 
     _in_memory_loans[loan_id] = loan
+
+    log_audit_event(
+        actor=user.get("email", str(user_id)),
+        role=user_role,
+        action="LOAN_RENEW",
+        resource_type="loan",
+        resource_id=loan_id,
+        details=f"Renewed loan for '{loan.get('bookTitle')}'. Renewal count: {loan['renewalsCount']}/{max_renewals}.",
+        level="INFO",
+    )
+
     return loan
 
 
@@ -548,10 +634,24 @@ def get_all_reservations(book_id: Optional[str] = None, user_id: Optional[str] =
 def create_reservation(user: Dict[str, Any], book_id: str) -> Dict[str, Any]:
     """Places a hold reservation on a title for a student."""
     _seed_circulation()
+    policy = get_circulation_policy()
+    max_res = policy.get("max_reservations_per_student", 3)
+
     user_id = user.get("id") or user.get("email")
     book = get_book_by_id(book_id)
     if not book:
         raise ValueError(f"Book '{book_id}' does not exist.")
+
+    if book.get("isArchived") or book.get("status") == "archived":
+        raise ValueError("Archived volumes cannot be reserved.")
+
+    # Check student active hold quota
+    user_active_res = [
+        r for r in get_all_reservations(user_id=user_id)
+        if r.get("status") in ("pending", "ready")
+    ]
+    if len(user_active_res) >= max_res:
+        raise ValueError(f"You have reached the maximum reservation quota of {max_res} titles.")
 
     # Prevent duplicate active reservation for same book
     user_res = get_all_reservations(book_id=book_id, user_id=user_id)
@@ -591,6 +691,17 @@ def create_reservation(user: Dict[str, Any], book_id: str) -> Dict[str, Any]:
             pass
 
     _in_memory_reservations[res_id] = new_res
+
+    log_audit_event(
+        actor=user.get("email", str(user_id)),
+        role=user.get("role", "student"),
+        action="RESERVATION_CREATE",
+        resource_type="reservation",
+        resource_id=res_id,
+        details=f"Queued hold for '{book.get('title')}' (Queue position: #{queue_pos}).",
+        level="INFO",
+    )
+
     return new_res
 
 
@@ -622,4 +733,15 @@ def cancel_reservation(reservation_id: str, user: Dict[str, Any]) -> Dict[str, A
             pass
 
     _in_memory_reservations[reservation_id] = target_res
+
+    log_audit_event(
+        actor=user.get("email", str(user_id)),
+        role=user_role,
+        action="RESERVATION_CANCEL",
+        resource_type="reservation",
+        resource_id=reservation_id,
+        details=f"Cancelled hold reservation on '{target_res.get('bookTitle')}'.",
+        level="INFO",
+    )
+
     return target_res

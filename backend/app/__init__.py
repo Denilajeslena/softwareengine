@@ -40,6 +40,10 @@ def create_app(config_name: str = None) -> Flask:
     from app.routes.analytics import analytics_bp
     from app.routes.notifications import notifications_bp
     from app.routes.reading import reading_bp
+    from app.routes.admin import admin_bp
+    from app.routes.inventory import inventory_bp
+    from app.routes.librarian import librarian_bp
+    from app.routes.student import student_bp
 
     app.register_blueprint(health_bp, url_prefix="/api")
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -49,6 +53,10 @@ def create_app(config_name: str = None) -> Flask:
     app.register_blueprint(analytics_bp, url_prefix="/api/analytics")
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
     app.register_blueprint(reading_bp, url_prefix="/api")
+    app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(inventory_bp, url_prefix="/api/inventory")
+    app.register_blueprint(librarian_bp, url_prefix="/api/librarian")
+    app.register_blueprint(student_bp, url_prefix="/api/student")
 
     # Centralized error handlers
     @app.errorhandler(404)

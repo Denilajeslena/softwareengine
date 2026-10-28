@@ -178,9 +178,20 @@ export const StudentStudyAssistantPage: React.FC = () => {
           {/* Result Header & Audio Bar */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-ivory-cream gap-3">
             <div>
-              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-charcoal-muted">
-                Synthesized Study Companion
-              </span>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-charcoal-muted">
+                  Synthesized Study Companion
+                </span>
+                <span
+                  className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded border ${
+                    (result as any).provider === 'local_heuristic'
+                      ? 'bg-amber-50 text-amber-900 border-amber-200'
+                      : 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                  }`}
+                >
+                  {(result as any).model || 'BookMind Engine'}
+                </span>
+              </div>
               <h3 className="font-serif text-lg font-bold text-forest-dark">{result.title}</h3>
               <p className="text-xs text-charcoal-muted mt-0.5">
                 {result.wordCount} words • Estimated {result.estimatedReadTimeMinutes} min read
@@ -207,6 +218,14 @@ export const StudentStudyAssistantPage: React.FC = () => {
               </SecondaryButton>
             </div>
           </div>
+
+          {/* Engine Transparency Notice */}
+          {(result as any).notice && (
+            <div className="p-3 rounded-xl bg-forest/5 border border-forest/15 text-xs text-charcoal leading-relaxed flex items-start gap-2.5">
+              <Sparkles className="h-4 w-4 text-gold-dark shrink-0 mt-0.5" />
+              <span>{(result as any).notice}</span>
+            </div>
+          )}
 
           {/* Study Tabs Navigation */}
           <div className="flex items-center gap-2 border-b border-ivory-cream pb-3">
