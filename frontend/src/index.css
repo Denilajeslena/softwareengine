@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-forest: #183D32;
+    --color-forest-dark: #102B24;
+    --color-ivory: #F8F5EC;
+    --color-cream: #EFE8D9;
+    --color-gold: #C3A66B;
+    --color-charcoal: #252B28;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #F8F5EC;
+    color: #252B28;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  /* Custom subtle scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #EFE8D9;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #CBD9D1;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #A4BCB1;
+  }
+}
+
+@layer utilities {
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-gold focus:ring-offset-2 focus:ring-offset-ivory;
+  }
+}
+
+/* Accessibility Scaling & Contrast Overrides */
+html.text-size-large {
+  font-size: 112.5%;
+}
+
+html.text-size-xlarge {
+  font-size: 125%;
+}
+
+html.font-dyslexic * {
+  font-family: 'OpenDyslexic', 'Comic Sans MS', sans-serif !important;
+  letter-spacing: 0.05em !important;
+  line-height: 1.7 !important;
+}
+
+html.contrast-dark {
+  filter: invert(0.92) hue-rotate(180deg);
+}
+
+html.contrast-dark img,
+html.contrast-dark video,
+html.contrast-dark [data-qr-code] {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+html.contrast-light {
+  contrast: 1.25;
+}
+
+
